@@ -10,12 +10,13 @@ enum Op {
 
 /// Put or Append
 message PutAppendRequest {
-
     string key = 1;
     string value = 2;
     // "Put" or "Append"
     Op op = 3;
     // You'll have to add definitions here.
+    bytes id = 4;
+    string client = 5;
 }
 
 message PutAppendReply {
@@ -26,10 +27,29 @@ message PutAppendReply {
 message GetRequest {
     string key = 1;
     // You'll have to add definitions here.
+    bytes id = 2;
+    string client = 3;
 }
 
 message GetReply {
     bool wrong_leader = 1;
     string err = 2;
     string value = 3;
+}
+
+message InstallLastCommand {
+    map<string, bytes> cmd = 1;
+}
+
+message InstallKvs {
+    map<string, string> kvs = 1;
+    uint64 lastIndex = 2;
+}
+
+
+message VirtualCommand {
+    oneof command {
+        InstallLastCommand ilc = 1;
+        InstallKvs ikv = 2;
+    }
 }

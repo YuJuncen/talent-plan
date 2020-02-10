@@ -42,3 +42,21 @@ message PersistedStatus {
     repeated uint64 votedFor = 2;
     repeated ProtoEntry logs = 3;
 }
+
+message Snapshot {
+    repeated bytes stateMachineState = 1;
+    uint64 lastTermOfSnapshot = 2;
+    uint64 lastIndexOfSnapshot = 3;
+}
+
+message InstallSnapshotArgs {
+    uint64 term = 1;
+    uint64 leaderId = 2;
+    uint64 lastIncludedIndex = 3;
+    uint64 lastIncludedTerm = 4;
+    repeated bytes data = 5;
+}
+
+message InstallSnapshotReply {
+    uint64 term = 1;
+}
