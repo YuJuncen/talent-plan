@@ -12,6 +12,8 @@ use labrpc::Error;
 use crate::proto::kvraftpb::*;
 use crate::select_idx;
 
+use super::server::err_codes::KVERR_TIMEOUT;
+
 #[derive(Debug, Clone)]
 enum Op {
     Put(String, String),
@@ -23,7 +25,8 @@ pub struct Clerk {
     pub servers: Vec<KvClient>,
     // You will have to modify this struct.
     leader: Cell<Option<usize>>,
-    rpc_execution_poll: ThreadPool,
+    last_leader: Cell<Option<usize>>,
+    rpc_execution_pool: ThreadPool,
 }
 
 impl Op {
@@ -65,10 +68,20 @@ impl Clerk {
             name,
             servers,
             leader: Cell::new(None),
-            rpc_execution_poll: pool,
+            last_leader: Cell::new(None),
+            rpc_execution_pool: pool,
         }
     }
 
+    /// set current leader and save last leader.
+    ///
+    /// We use this function when we think there is partition only.
+    fn impeach_leader(&self) {
+        self.last_leader.set(self.leader.get());
+        self.leader.set(None)
+    }
+
+    /// Run a future at the thread pool.
     fn run_async<I, E>(
         &self,
         f: impl Future<Item = I, Error = E> + Send + 'static,
@@ -78,7 +91,7 @@ impl Clerk {
         E: Send + 'static,
     {
         let (sx, rx) = channel();
-        self.rpc_execution_poll.spawn(move || {
+        self.rpc_execution_pool.spawn(move || {
             let _ = sx.send(f.wait());
         });
         rx
@@ -89,6 +102,12 @@ impl Clerk {
         id.as_bytes().to_vec()
     }
 
+    /// try send to current leader by `send` function.
+    ///
+    /// # returns
+    /// if current leader is valid, and request success, return `Some` of send result.
+    ///
+    /// if current leader is changed or absent, return `None` and set `self.leader` to `None`.
     fn try_send_to_current_leader<R>(
         &self,
         send: impl Fn(&KvClient) -> Receiver<R>,
@@ -100,7 +119,7 @@ impl Clerk {
             let message = send(&self.servers[leader]).recv_timeout(timeout);
             if message.is_err() {
                 debug!("{}: leader {} is timeout :(", self.name, leader);
-                self.leader.set(None);
+                self.impeach_leader();
                 return None;
             }
 
@@ -108,7 +127,7 @@ impl Clerk {
             return if !is_leader(&message) {
                 // leadership changed.
                 debug!("{}: leader {} is died :(", self.name, leader);
-                self.leader.set(None);
+                self.impeach_leader();
                 None
             } else {
                 Some(message)
@@ -118,6 +137,12 @@ impl Clerk {
         None
     }
 
+    /// check the leadership and send then send the request.
+    ///
+    /// # return
+    /// It will never return if no leader found.
+    ///
+    /// Once success, return the item provided by `send` function.
     fn check_leader_and_send<R: Send + 'static>(
         &self,
         send: impl Fn(&KvClient) -> Receiver<R>,
@@ -132,7 +157,11 @@ impl Clerk {
             loop {
                 match send_items.recv_timeout(timeout) {
                     Ok((i, result)) => {
-                        if is_leader(&result) {
+                        // current leader rarely re-elected.
+                        // this helps us find real leader when partition happens.
+                        if is_leader(&result)
+                            && self.last_leader.get().map(|l| l != i).unwrap_or(true)
+                        {
                             debug!("We found leader {}!", i);
                             self.leader.set(Some(i));
                             return result;
@@ -141,12 +170,22 @@ impl Clerk {
                     Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
+            // forget the history of sadness -- people always need to look forward.
+            self.last_leader.set(None);
             // ensure that there is a leader elected.
             info!("CHECK_LEADER: failed to find leader... retrying...");
             std::thread::sleep(Duration::from_millis(300));
         }
     }
 
+    /// make a request.
+    ///
+    /// This send to current leader first, when fail, it will try to find new leader.
+    ///
+    /// This function will never return if no leader find or rpc continuing fail.
+    ///
+    /// # returns
+    /// the item provided by `send` function.
     fn request<R: Send + 'static>(
         &self,
         send: impl Fn(&KvClient) -> Receiver<R>,
@@ -202,10 +241,21 @@ impl Clerk {
                     );
                     return message.value.clone();
                 }
-                Ok(ref message) => info!("GET: occurs error: {}, retrying...", message.err),
-                Err(_) => {
+                Ok(ref message) => {
+                    info!(
+                        "GET: error: '{}', don't worry, I will try again.",
+                        message.err
+                    );
+                    // Maybe, we meet partition.
+                    if message.err_code == KVERR_TIMEOUT {
+                        info!("GET: commit timeout, we might follow wrong leader, search leader again...");
+                        self.impeach_leader();
+                    }
+                    std::thread::sleep(Duration::from_millis(300))
+                }
+                _ => {
                     info!("GET: failed to send request");
-                    std::thread::sleep(Duration::from_millis(200))
+                    std::thread::sleep(Duration::from_millis(300))
                 }
             }
         }
@@ -240,12 +290,24 @@ impl Clerk {
                     );
                     return;
                 }
+                Ok(ref message) => {
+                    info!(
+                        "PUT_APPEND: error: '{}', don't worry, I will try again.",
+                        message.err
+                    );
+                    // Maybe, we meet partition.
+                    if message.err_code == KVERR_TIMEOUT {
+                        info!("PUT_APPEND: commit timeout, we might follow wrong leader, search leader again...");
+                        self.impeach_leader();
+                    }
+                    std::thread::sleep(Duration::from_millis(300))
+                }
                 _ => {
                     info!(
                         "{}: put_append({:?}) failed, sleeping before resend...",
                         self.name, args
                     );
-                    std::thread::sleep(Duration::from_millis(200))
+                    std::thread::sleep(Duration::from_millis(300))
                 }
             }
         }
