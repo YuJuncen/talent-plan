@@ -230,7 +230,7 @@ impl Clerk {
         };
 
         loop {
-            match self.request(&send, &is_leader, Duration::from_millis(300)) {
+            match self.request(&send, &is_leader, Duration::from_millis(400)) {
                 Ok(ref message) if message.err.is_empty() => {
                     info!(
                         "{} get({:?}) => {:?} ({:?})",
@@ -279,7 +279,7 @@ impl Clerk {
         };
 
         loop {
-            match self.request(&send, &is_leader, Duration::from_millis(300)) {
+            match self.request(&send, &is_leader, Duration::from_millis(400)) {
                 Ok(ref result) if result.err.is_empty() => {
                     info!(
                         "{} put_append({:?}) => {:?} ({:?})",
